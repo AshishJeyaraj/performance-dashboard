@@ -562,5 +562,4 @@ def main():
     display_all_teams_contribution(df_week)
 
 if __name__ == "__main__":
->>>>>>> 82592aa1d1791533f1e57f5df0b545869cbca93c
     main()
