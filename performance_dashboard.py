@@ -279,7 +279,6 @@ def main():
     display_all_teams_contribution(df_week)
 
 if __name__ == "__main__":
-=======
 import pandas as pd
 import streamlit as st
 from io import StringIO
