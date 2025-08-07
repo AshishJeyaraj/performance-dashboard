@@ -2,4 +2,3 @@ streamlit
 pandas
 requests
 numpy
-pywin32
