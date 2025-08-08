@@ -63,28 +63,44 @@ API_BASE_URL = f"https://{API_IP}/api/record/DAPPATC/teamactivity"  # Use IP dir
 
 @st.cache_data(ttl=600)
 def fetch_data_from_api():
-    """Fetches data for current/previous month from API using IP + Host header."""
+    """Fetches data for current/previous month from API, 
+    trying hostname first, then falling back to IP + Host header."""
+    API_HOST = "dashproach.amadeus.net"
+    API_IP = "10.57.52.6"  # Fallback IP for office network
+
     today = datetime.now()
     all_data = []
-    for month_offset in range(2):
-        dt = today - pd.DateOffset(months=month_offset)
-        url = f"{API_BASE_URL}?year={dt.year}&month={dt.month}"
-        try:
-            response = requests.get(
-                url,
-                timeout=20,
-                verify=False,  # internal cert
-                headers={"Host": API_HOST}  # preserve virtual host
-            )
-            response.raise_for_status()
-            all_data.append(response.text)
-        except requests.exceptions.RequestException as e:
-            st.error(
-                f"Failed to fetch data from API ({url}): {e}\n"
-                "Tip: Ensure you are connected to the office network/VPN."
-            )
-            return None
-    return "\n".join(all_data)
+
+    # First try hostname
+    try:
+        st.caption(f"🌐 Trying direct hostname: {API_HOST}")
+        for month_offset in range(2):
+            dt = today - pd.DateOffset(months=month_offset)
+            url = f"https://{API_HOST}/api/record/DAPPATC/teamactivity?year={dt.year}&month={dt.month}"
+            r = requests.get(url, timeout=20, verify=False)
+            r.raise_for_status()
+            all_data.append(r.text)
+        st.success(f"✅ Data fetched using hostname: {API_HOST}")
+        return "\n".join(all_data)
+    except Exception as e:
+        st.warning(f"⚠️ Hostname method failed: {e}")
+        st.caption(f"🔄 Falling back to IP method: {API_IP} with Host header")
+
+    # Fallback to IP + Host header
+    try:
+        all_data.clear()
+        for month_offset in range(2):
+            dt = today - pd.DateOffset(months=month_offset)
+            url = f"https://{API_IP}/api/record/DAPPATC/teamactivity?year={dt.year}&month={dt.month}"
+            r = requests.get(url, timeout=20, verify=False, headers={"Host": API_HOST})
+            r.raise_for_status()
+            all_data.append(r.text)
+        st.success(f"✅ Data fetched using fallback IP method: {API_IP}")
+        return "\n".join(all_data)
+    except Exception as e:
+        st.error(f"❌ Failed to fetch data from both hostname and IP: {e}")
+        return None
+
 
 @st.cache_data(ttl=600)
 def load_and_process_data(raw_csv_data):
