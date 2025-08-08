@@ -55,22 +55,34 @@ CSV_COLUMN_NAMES = [
     "tags", "start_date", "end_date", "duration_days", "title", "entity_1_code",
     "entity_1_name", "entity_2_code", "entity_2_name", "entity_3_code", "entity_3_name"
 ]
-API_BASE_URL = "https://dashproach.amadeus.net/api/record/DAPPATC/teamactivity"
+
+# === API Settings (Modified for Office Network) ===
+API_HOST = "dashproach.amadeus.net"
+API_IP = "10.57.52.6"  # Resolved from nslookup in office network
+API_BASE_URL = f"https://{API_IP}/api/record/DAPPATC/teamactivity"  # Use IP directly
 
 @st.cache_data(ttl=600)
 def fetch_data_from_api():
-    """Fetches data for current/previous month from API, handling internal SSL."""
+    """Fetches data for current/previous month from API using IP + Host header."""
     today = datetime.now()
     all_data = []
     for month_offset in range(2):
         dt = today - pd.DateOffset(months=month_offset)
         url = f"{API_BASE_URL}?year={dt.year}&month={dt.month}"
         try:
-            response = requests.get(url, timeout=20, verify=False)
+            response = requests.get(
+                url,
+                timeout=20,
+                verify=False,  # internal cert
+                headers={"Host": API_HOST}  # preserve virtual host
+            )
             response.raise_for_status()
             all_data.append(response.text)
         except requests.exceptions.RequestException as e:
-            st.error(f"Failed to fetch data from API ({url}): {e}")
+            st.error(
+                f"Failed to fetch data from API ({url}): {e}\n"
+                "Tip: Ensure you are connected to the office network/VPN."
+            )
             return None
     return "\n".join(all_data)
 
@@ -81,21 +93,14 @@ def load_and_process_data(raw_csv_data):
         return pd.DataFrame()
     try:
         df = pd.read_csv(StringIO(raw_csv_data), header=None, names=CSV_COLUMN_NAMES)
-
-        # Consistent naming, lowercase working key retained
         df.rename(columns={"assignee_name": "Team Member", "rec_type": "Record Type"}, inplace=True)
         df["Team Member"] = df["Team Member"].str.lower().fillna("unassigned")
         df["tags"] = df["tags"].str.lower().fillna("")
-
-        # NEW: more robust timezone handling (doesn't double-localize)
         df["start_date"] = pd.to_datetime(df["start_date"], errors='coerce', utc=True)
         df["end_date"] = pd.to_datetime(df["end_date"], errors='coerce', utc=True)
-
         df.dropna(subset=["start_date", "end_date"], inplace=True)
-
         iso_cal = df["end_date"].dt.isocalendar()
         df["year_week"] = iso_cal["year"].astype(str) + "-W" + iso_cal["week"].astype(str).str.zfill(2)
-
         df['Team'] = df['Team Member'].apply(
             lambda x: 'UCS Bangalore' if x in UCS_BANGALORE_TEAM_LOWER else 'Other Teams'
         )
@@ -105,7 +110,6 @@ def load_and_process_data(raw_csv_data):
         return pd.DataFrame()
 
 def calculate_contribution_summary(df, team_members):
-    """Generic function to calculate contribution summary for a given dataframe and member list."""
     df_contributions = df[df['Record Type'].isin(CONTRIBUTION_RECORD_TYPES)].copy()
     gross = df_contributions.groupby('Team Member').size()
     exempted = df_contributions[df_contributions['tags'].str.contains(EXEMPTION_REGEX, na=False)].groupby('Team Member').size()
@@ -116,7 +120,6 @@ def calculate_contribution_summary(df, team_members):
     summary['Net Contributions'] = summary['Gross Contributions (WO,PTR,TR)'] - summary['Exempted']
     return summary
 
-# NEW: a small helper to compute TOTAL net contributions for any slice (all members)
 def total_net_contributions(df_slice: pd.DataFrame) -> int:
     if df_slice.empty:
         return 0
@@ -126,55 +129,39 @@ def total_net_contributions(df_slice: pd.DataFrame) -> int:
     return int(gross - exempted)
 
 def display_top_performers(weekly_summary, monthly_summary, selected_month_str):
-    """Displays the top weekly and monthly contributors."""
     st.header("🏆 Top Performers")
     col1, col2 = st.columns(2)
-
-    # Weekly Top Performer
     if not weekly_summary.empty and weekly_summary['Net Contributions'].sum() > 0:
         top_weekly_contributor = weekly_summary['Net Contributions'].idxmax()
         top_weekly_count = int(weekly_summary['Net Contributions'].max())
-        col1.metric(
-            label="Top Contributor of the Week",
-            value=top_weekly_contributor,
-            help="Based on Net Contributions for the selected week."
-        )
+        col1.metric("Top Contributor of the Week", value=top_weekly_contributor,
+                    help="Based on Net Contributions for the selected week.")
         col1.write(f"**Net Contributions:** {top_weekly_count}")
-
-    # Monthly Top Performer
     if not monthly_summary.empty and monthly_summary['Net Contributions'].sum() > 0:
         top_monthly_contributor = monthly_summary['Net Contributions'].idxmax()
         top_monthly_count = int(monthly_summary['Net Contributions'].max())
-        col2.metric(
-            label=f"Top Contributor for {selected_month_str}",
-            value=top_monthly_contributor,
-            help="Based on Net Contributions for the selected month."
-        )
+        col2.metric(f"Top Contributor for {selected_month_str}", value=top_monthly_contributor,
+                    help="Based on Net Contributions for the selected month.")
         col2.write(f"**Net Contributions:** {top_monthly_count}")
 
 def display_target_analysis(summary_df):
-    """Displays the UCS Bangalore target analysis table."""
     st.header("🚀 UCS Bangalore Target Analysis (Full Week: Mon–Sun)")
     summary_df[f'Needed for Target ({INDIVIDUAL_TARGET})'] = (INDIVIDUAL_TARGET - summary_df['Net Contributions']).clip(lower=0)
     summary_df.rename(columns={'Net Contributions': 'Net Contributions (For Target)'}, inplace=True)
-
     st.dataframe(
-        summary_df.style.format("{:d}").background_gradient(
-            cmap='Greens', subset=['Net Contributions (For Target)']
-        ).background_gradient(
-            cmap='Oranges', subset=['Exempted']
-        ).background_gradient(
-            cmap='Blues', subset=['Gross Contributions (WO,PTR,TR)']
-        ),
+        summary_df.style.format("{:d}")
+            .background_gradient(cmap='Greens', subset=['Net Contributions (For Target)'])
+            .background_gradient(cmap='Oranges', subset=['Exempted'])
+            .background_gradient(cmap='Blues', subset=['Gross Contributions (WO,PTR,TR)']),
         use_container_width=True
     )
 
 def display_email_tool(ucs_summary_df, selected_year_week):
     with st.expander("📧 Send Email Notifications to Team Members (via Outlook)"):
         if win32 is None:
-            st.warning("Email functionality is disabled because 'pywin32' is not installed. This is expected on deployed apps.")
+            st.warning("Email functionality is disabled because 'pywin32' is not installed.")
             return
-        st.info(f"Emails will be sent from **{SENDER_EMAIL}** (requires Outlook and permissions).")
+        st.info(f"Emails will be sent from **{SENDER_EMAIL}**.")
         recipients = st.multiselect("Select recipients:", options=ucs_summary_df.index.tolist(), default=[])
         if st.button("✉️ Send Selected Emails via Outlook"):
             if not recipients:
@@ -188,12 +175,10 @@ def display_email_tool(ucs_summary_df, selected_year_week):
                             st.warning(f"No email found for {name}. Skipping.")
                             continue
                         subject = f"Your Weekly Contribution Summary - {selected_year_week}"
-                        body = (
-                            f"Hi {name.split(' ')[0]},\n\nHere is your performance summary for week {selected_year_week}:\n\n"
-                            f"- Your Net Contributions: {person_data['Net Contributions (For Target)']}\n"
-                            f"- Activities Needed to Meet Target ({INDIVIDUAL_TARGET}): {person_data[f'Needed for Target ({INDIVIDUAL_TARGET})']}\n\n"
-                            f"Thank you!\nTeam Management"
-                        )
+                        body = (f"Hi {name.split(' ')[0]},\n\nHere is your performance summary for week {selected_year_week}:\n\n"
+                                f"- Your Net Contributions: {person_data['Net Contributions (For Target)']}\n"
+                                f"- Activities Needed to Meet Target ({INDIVIDUAL_TARGET}): "
+                                f"{person_data[f'Needed for Target ({INDIVIDUAL_TARGET})']}\n\nThank you!\nTeam Management")
                         send_email_with_outlook(recipient_email, subject, body)
                     st.success("Email sending process complete.")
 
@@ -216,7 +201,6 @@ def send_email_with_outlook(recipient_email, subject, body):
 
 def display_drill_down_analysis(df_week_all_days):
     st.header("🔍 Detailed Activity Drill-Down")
-    st.info("Select a team member to see every record that **ended** in this ISO week and its status.")
     member_list = sorted(df_week_all_days['Team Member'].unique())
     display_member_list = [LOWER_TO_ORIGINAL_CASE_MAP.get(m, m.title()) for m in member_list]
     selected_member_display = st.selectbox("Select a Team Member to Analyze:", display_member_list)
@@ -228,7 +212,6 @@ def display_drill_down_analysis(df_week_all_days):
         conditions = [~is_contrib_type, is_contrib_type & has_exempt_tag]
         choices = ["❌ Excluded (Not a WO, PTR, or TR)", "⚠️ Excluded (Exempted Tag)"]
         member_df['Status'] = np.select(conditions, choices, default="✅ Included in Net Count")
-
         st.subheader(f"All Activities Ending in Selected Week for: {selected_member_display}")
         st.dataframe(
             member_df[['record_id', 'Record Type', 'start_date', 'end_date', 'title', 'tags', 'Status']].sort_values("Status"),
@@ -242,7 +225,6 @@ def display_drill_down_analysis(df_week_all_days):
 def display_all_teams_contribution(df_week_all_days):
     st.markdown("---")
     st.header("📊 Full DAPPATC Team Contributions (Selected Week)")
-    st.markdown("This table shows the contributions for all team members in the dataset for the selected week.")
     df_contrib = df_week_all_days[df_week_all_days['Record Type'].isin(CONTRIBUTION_RECORD_TYPES)].copy()
     gross = df_contrib.groupby('Team Member').size()
     exempted = df_contrib[df_contrib['tags'].str.contains(EXEMPTION_REGEX, na=False)].groupby('Team Member').size()
@@ -251,55 +233,31 @@ def display_all_teams_contribution(df_week_all_days):
     summary.index = [LOWER_TO_ORIGINAL_CASE_MAP.get(name, name.title()) for name in summary.index]
     st.dataframe(summary.sort_values('Net Contributions', ascending=False), use_container_width=True)
 
-# NEW: UCS share widgets (metrics + mini pie) for week & month
 def display_ucs_share(df_week, df_month, ucs_weekly_summary, ucs_monthly_summary, selected_month_str):
     st.markdown("---")
     st.header("🧭 UCS Contribution Share")
-
-    # Weekly
     ucs_net_week = int(ucs_weekly_summary['Net Contributions'].sum()) if not ucs_weekly_summary.empty else 0
     all_net_week = total_net_contributions(df_week)
     pct_week = (ucs_net_week / all_net_week * 100.0) if all_net_week > 0 else 0.0
-
-    # Monthly
     ucs_net_month = int(ucs_monthly_summary['Net Contributions'].sum()) if not ucs_monthly_summary.empty else 0
     all_net_month = total_net_contributions(df_month)
     pct_month = (ucs_net_month / all_net_month * 100.0) if all_net_month > 0 else 0.0
-
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("UCS Net (Week)", value=ucs_net_week)
     c2.metric("UCS Share (Week)", value=f"{pct_week:.1f}%")
     c3.metric(f"UCS Net ({selected_month_str})", value=ucs_net_month)
     c4.metric(f"UCS Share ({selected_month_str})", value=f"{pct_month:.1f}%")
-
-    # Tiny pies (purely visual)
-    pie_week = px.pie(
-        values=[ucs_net_week, max(all_net_week - ucs_net_week, 0)],
-        names=["UCS", "Others"],
-        title=f"Weekly Share",
-        hole=0.5
-    )
-    pie_month = px.pie(
-        values=[ucs_net_month, max(all_net_month - ucs_net_month, 0)],
-        names=["UCS", "Others"],
-        title=f"{selected_month_str} Share",
-        hole=0.5
-    )
+    pie_week = px.pie(values=[ucs_net_week, max(all_net_week - ucs_net_week, 0)], names=["UCS", "Others"], title="Weekly Share", hole=0.5)
+    pie_month = px.pie(values=[ucs_net_month, max(all_net_month - ucs_net_month, 0)], names=["UCS", "Others"], title=f"{selected_month_str} Share", hole=0.5)
     p1, p2 = st.columns(2)
     p1.plotly_chart(pie_week, use_container_width=True)
     p2.plotly_chart(pie_month, use_container_width=True)
 
 def main():
     st.title("🏆 Team Performance & Target Dashboard")
-    st.info(
-        "💡 **Correct Logic:** Data is grouped by the **End Date (Time_out)** of an activity. "
-        "A contribution is a record of type **WO, PTR, or TR**, minus exemptions."
-    )
-
     st.sidebar.header("⚙️ Data Source")
     if 'df_full' not in st.session_state:
         st.session_state.df_full = pd.DataFrame()
-
     if st.sidebar.button("🚀 Fetch & Analyze Live Data", type="primary"):
         with st.spinner("Fetching and processing latest data..."):
             raw_data = fetch_data_from_api()
@@ -307,41 +265,25 @@ def main():
                 st.session_state.df_full = load_and_process_data(raw_data)
                 if not st.session_state.df_full.empty:
                     st.sidebar.success("Data processed successfully!")
-
     if st.session_state.df_full.empty:
         st.info("⬅️ Click 'Fetch & Analyze Live Data' in the sidebar to begin.")
         return
-
-    # --- Sidebar Filters ---
     st.sidebar.markdown("---")
     st.sidebar.header("Weekly Analysis")
     available_year_weeks = sorted(st.session_state.df_full["year_week"].unique(), reverse=True)
     selected_year_week = st.sidebar.selectbox("Select a Week to Analyze", options=available_year_weeks, index=0)
-
     st.sidebar.markdown("---")
     st.sidebar.header("Monthly Analysis")
     available_months = sorted(st.session_state.df_full['end_date'].dt.to_period('M').unique().astype(str), reverse=True)
     selected_month = st.sidebar.selectbox("Select a Month to Analyze", options=available_months, index=0)
-
-    # --- Data Slicing and Calculations ---
     df_week = st.session_state.df_full[st.session_state.df_full["year_week"] == selected_year_week]
     df_month = st.session_state.df_full[st.session_state.df_full['end_date'].dt.to_period('M').astype(str) == selected_month]
-
-    ucs_weekly_summary = calculate_contribution_summary(
-        df_week[df_week['Team'] == 'UCS Bangalore'], ORIGINAL_CASE_TEAM
-    )
-    ucs_monthly_summary = calculate_contribution_summary(
-        df_month[df_month['Team'] == 'UCS Bangalore'], ORIGINAL_CASE_TEAM
-    )
-
-    # --- Display Dashboard Sections ---
+    ucs_weekly_summary = calculate_contribution_summary(df_week[df_week['Team'] == 'UCS Bangalore'], ORIGINAL_CASE_TEAM)
+    ucs_monthly_summary = calculate_contribution_summary(df_month[df_month['Team'] == 'UCS Bangalore'], ORIGINAL_CASE_TEAM)
     selected_month_str = datetime.strptime(selected_month, "%Y-%m").strftime("%B %Y")
     display_top_performers(ucs_weekly_summary, ucs_monthly_summary, selected_month_str)
     st.markdown("---")
-
-    # NEW: UCS contribution + contribution % (week & month)
     display_ucs_share(df_week, df_month, ucs_weekly_summary, ucs_monthly_summary, selected_month_str)
-
     display_target_analysis(ucs_weekly_summary)
     display_email_tool(ucs_weekly_summary, selected_year_week)
     display_drill_down_analysis(df_week)
