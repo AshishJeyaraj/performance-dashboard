@@ -465,6 +465,14 @@ def display_yearly_explorer(df_full: pd.DataFrame):
                 labels={"year_week": "ISO Week", "net": "Net Contributions"},
                 title=f"Weekly Net Contributions – {chosen_member_w} ({year})"
             )
+            # --- NEW FEATURE: Target line at 15 on weekly trend chart ---
+            line.add_hline(
+                y=INDIVIDUAL_TARGET,
+                line_dash="dash",
+                line_color="darkred",   
+                annotation_text=f"Target {INDIVIDUAL_TARGET}",
+                annotation_position="top left"
+            )
             st.plotly_chart(line, use_container_width=True)
 
     # --- NEW: Per-member Monthly Trend ---
@@ -498,10 +506,14 @@ def display_yearly_explorer(df_full: pd.DataFrame):
 
         # Optional: show table for quick copy
         with st.expander("Show monthly values table"):
-            st.dataframe(
-                m_trend[["month", "net"]].rename(columns={"month": "Month", "net": "Net"}),
-                use_container_width=True
+            # --- NEW FEATURE: include total of all months in the same table ---
+            table_df = m_trend[["month", "net"]].rename(columns={"month": "Month", "net": "Net"}).copy()
+            total_val = int(table_df["Net"].sum())
+            table_df = pd.concat(
+                [table_df, pd.DataFrame([{"Month": "Total", "Net": total_val}])],
+                ignore_index=True
             )
+            st.dataframe(table_df, use_container_width=True)
 
 # =========================================================
 # MAIN
@@ -606,3 +618,9 @@ def main():
 
 if __name__ == "__main__":
     main()
+# Run the Streamlit app
+# To run, use: streamlit run performance_dashboard.py
+# Ensure you have the required libraries installed:
+# pip install streamlit pandas plotly pythoncom pywin32 requests
+# Note: The Outlook email functionality requires 'pywin32' to be installed.
+# If running outside of the office network, ensure the API_HOST is reachable.
